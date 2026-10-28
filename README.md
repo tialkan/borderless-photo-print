@@ -45,7 +45,7 @@ swiftc -O tools/demo/main.swift Sources/PageLayout.swift -o build/demo && build/
 ## How it works
 
 The app talks to CUPS through the standard `lp`, `lpstat` and `cancel` tools. For each photo it
-renders a finished 2400×3600 px (600 dpi) sheet to a temporary JPEG, sends it with the borderless
+renders a finished 2400×3600 px (600 dpi) sheet to a temporary PNG, sends it with the borderless
 `4x6.Fullbleed` page size, and then polls `lpstat` every two seconds to map each job to a state.
 
 The layout is done in the app rather than through printer or CUPS scaling options, so the result does
@@ -70,8 +70,14 @@ verified this on a Turkish-language system.
   `lpoptions -p <printer> -l` and edit the table.
 - The page size is fixed at 4×6 inch. The printer must offer a borderless `4x6.Fullbleed` size.
 - The system default printer is selected at launch; you can change it in the window.
-- "Printed" means CUPS reports the job as completed successfully. It cannot see a paper jam or an
-  empty tray.
+- The sheet is sent as PNG, not JPEG. CUPS passes JPEG files straight to the printer, and the HP Smart
+  Tank answered `Send-Document` for them with `client-error-document-unprintable-error`; a PNG is
+  rasterised by CUPS first and printed.
+- "Printed" means the printer reports at least one page printed for the job
+  (`job-impressions-completed`). CUPS leaves `processing-to-stop-point` on successful jobs too, so the
+  job-state reasons cannot be used for this. It cannot see a paper jam or an empty tray.
+- Borderless printing slightly enlarges the page, so a thin strip at the edges can be cut off (visible
+  on a test print of the figure above).
 - The interface text is currently Turkish only.
 - I have only built it on macOS 27 (Apple silicon). `Info.plist` declares macOS 13 as the minimum, which I
   have not verified.

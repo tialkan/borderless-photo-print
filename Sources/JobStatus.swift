@@ -48,18 +48,29 @@ func parseJobList(_ text: String) -> [Int: String] {
     return jobs
 }
 
+/// `ipptool -tv ... get-job-attributes` prints "job-impressions-completed (integer) = N": the pages the
+/// printer reports as printed. CUPS leaves "processing-to-stop-point" on successful jobs too, so it
+/// cannot be used to tell a printed job from a refused one.
+func parseImpressions(_ text: String) -> Int? {
+    guard let r = text.range(of: "job-impressions-completed (integer) = ") else { return nil }
+    return Int(text[r.upperBound...].prefix { $0.isNumber })
+}
+
 struct QueueSnapshot {
     var pending: [Int: String] = [:]   // not-completed jobs
     var history: [Int: String] = [:]   // all jobs, including completed and canceled
+    var impressions: [Int: Int] = [:]  // pages printed, for jobs that have left the queue
 
     func state(of job: Int) -> (JobState, String?) {
         if let text = pending[job] {
             return (text.contains("job-printing") ? .printing : .queued, nil)
         }
         let text = history[job] ?? ""
-        if text.contains("completed-successfully") { return (.done, nil) }
         if text.contains("canceled-by-user") { return (.canceled, nil) }
-        // A job the printer refused is aborted by the system and carries only "processing-to-stop-point".
+        if let pages = impressions[job] {
+            return pages > 0 ? (.done, nil) : (.failed, "Yazıcı belgeyi basmadı")
+        }
+        if text.contains("completed-successfully") { return (.done, nil) }
         if text.contains("processing-to-stop-point") || text.contains("abort") || text.contains("error") || text.contains("stopped") {
             return (.failed, text.trimmingCharacters(in: .whitespaces))
         }

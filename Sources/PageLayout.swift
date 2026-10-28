@@ -61,11 +61,13 @@ func composePage(_ img: CGImage, turns: Int, fill: Bool, width: Int) -> CGImage?
     return ctx.makeImage()
 }
 
-/// Renders the finished sheet (600 dpi) to a temporary JPEG for CUPS.
+/// Renders the finished sheet (600 dpi) to a temporary PNG for CUPS. PNG on purpose: CUPS hands JPEG
+/// files straight to the printer, and the HP Smart Tank answered Send-Document for them with
+/// client-error-document-unprintable-error. A PNG is rasterised by CUPS itself (image/urf) instead.
 func printableURL(for url: URL, tempDir: URL, turns: Int, fill: Bool) -> URL? {
     guard let base = orientedImage(url), let page = composePage(base, turns: turns, fill: fill, width: 2400) else { return nil }
-    let out = tempDir.appendingPathComponent(UUID().uuidString + ".jpg")
-    guard let dest = CGImageDestinationCreateWithURL(out as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
-    CGImageDestinationAddImage(dest, page, [kCGImageDestinationLossyCompressionQuality: 0.98] as CFDictionary)
+    let out = tempDir.appendingPathComponent(UUID().uuidString + ".png")
+    guard let dest = CGImageDestinationCreateWithURL(out as CFURL, UTType.png.identifier as CFString, 1, nil) else { return nil }
+    CGImageDestinationAddImage(dest, page, nil)
     return CGImageDestinationFinalize(dest) ? out : nil
 }

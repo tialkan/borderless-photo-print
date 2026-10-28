@@ -60,12 +60,20 @@ func listPrinters() -> (names: [String], preferred: String?) {
     return (names, preferred)
 }
 
+/// Pages the printer reports as printed for a job that has left the queue.
+func impressions(of job: Int) -> Int? {
+    parseImpressions(run("/usr/bin/ipptool", ["-tv", "ipp://localhost/jobs/\(job)",
+                                              "/usr/share/cups/ipptool/get-job-attributes.test"]).out)
+}
+
 /// Blocks until the job has left the CUPS queue and returns its final state; nil if it never left.
 func waitForJob(_ job: Int) async -> JobState? {
     for _ in 0..<450 {   // 15 minutes
         if parseJobList(run("/usr/bin/lpstat", ["-W", "not-completed", "-o"]).out)[job] == nil {
             let history = parseJobList(run("/usr/bin/lpstat", ["-W", "all", "-l", "-o"]).out)
-            return QueueSnapshot(pending: [:], history: history).state(of: job).0
+            var snap = QueueSnapshot(pending: [:], history: history)
+            snap.impressions[job] = impressions(of: job)
+            return snap.state(of: job).0
         }
         try? await Task.sleep(nanoseconds: 2_000_000_000)
     }
@@ -239,10 +247,12 @@ final class PrintModel: ObservableObject {
             return (p.id, job)
         }
         guard !tracked.isEmpty else { return }
-        let snap = await Task.detached {
-            QueueSnapshot(
+        let snap = await Task.detached { () -> QueueSnapshot in
+            var s = QueueSnapshot(
                 pending: parseJobList(run("/usr/bin/lpstat", ["-W", "not-completed", "-l", "-o"]).out),
                 history: parseJobList(run("/usr/bin/lpstat", ["-W", "all", "-l", "-o"]).out))
+            for (_, job) in tracked where s.pending[job] == nil { s.impressions[job] = impressions(of: job) }
+            return s
         }.value
         for (id, job) in tracked {
             let (state, message) = snap.state(of: job)
