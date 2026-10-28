@@ -15,6 +15,11 @@ Drop in photos, press Print. Each photo is laid out on the sheet by the app itse
 - **Queue tracking.** Every photo shows its real state: sending, queued (with its place in line),
   printing, printed, failed or canceled, plus a summary line. "Cancel pending" cancels only the jobs
   this app sent, and "Print" never re-sends photos that are already in the queue.
+- **One photo at a time.** Some printers (the HP Smart Tank I developed against reports
+  `spool-area-full` and refuses the next job) hold a single job. The app waits for each job to leave
+  the queue before sending the next, and retries a refused job up to three times.
+- **Saved session.** The photo list, rotations, per-photo full-bleed choices and job states are saved to
+  `~/Library/Application Support/Fotoğraf Çıktı/session.json`, so quitting the app loses nothing.
 
 ![Layout of four photo shapes: original, lossless fit, full bleed](docs/layout.png)
 

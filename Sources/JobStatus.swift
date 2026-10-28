@@ -1,6 +1,6 @@
 import Foundation
 
-enum JobState: Hashable {
+enum JobState: String, Codable, Hashable {
     case ready, sending, queued, printing, done, canceled, failed
 
     var label: String {
@@ -58,10 +58,12 @@ struct QueueSnapshot {
         }
         let text = history[job] ?? ""
         if text.contains("completed-successfully") { return (.done, nil) }
-        if text.contains("cancel") || text.contains("processing-to-stop-point") { return (.canceled, nil) }
-        if text.contains("abort") || text.contains("error") || text.contains("stopped") {
+        if text.contains("canceled-by-user") { return (.canceled, nil) }
+        // A job the printer refused is aborted by the system and carries only "processing-to-stop-point".
+        if text.contains("processing-to-stop-point") || text.contains("abort") || text.contains("error") || text.contains("stopped") {
             return (.failed, text.trimmingCharacters(in: .whitespaces))
         }
+        if text.contains("cancel") { return (.canceled, nil) }
         // Left the queue without a recorded reason (history purged): the printer accepted it.
         return (.done, history[job] == nil ? "Kuyruktan çıktı, sonuç doğrulanamadı" : nil)
     }

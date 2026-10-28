@@ -60,23 +60,94 @@ func listPrinters() -> (names: [String], preferred: String?) {
     return (names, preferred)
 }
 
+/// Blocks until the job has left the CUPS queue and returns its final state; nil if it never left.
+func waitForJob(_ job: Int) async -> JobState? {
+    for _ in 0..<450 {   // 15 minutes
+        if parseJobList(run("/usr/bin/lpstat", ["-W", "not-completed", "-o"]).out)[job] == nil {
+            let history = parseJobList(run("/usr/bin/lpstat", ["-W", "all", "-l", "-o"]).out)
+            return QueueSnapshot(pending: [:], history: history).state(of: job).0
+        }
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+    }
+    return nil
+}
+
+// MARK: - Saved session
+
+struct SavedPhoto: Codable {
+    var path: String
+    var turns: Int
+    var fit: String?
+    var state: JobState
+    var jobID: Int?
+}
+
+struct SavedSession: Codable {
+    var photos: [SavedPhoto]
+    var paper: String
+    var fit: String
+    var copies: Int
+    var printer: String
+}
+
 // MARK: - View model
 
 @MainActor
 final class PrintModel: ObservableObject {
-    @Published var photos: [Photo] = []
+    @Published var photos: [Photo] = [] { didSet { save() } }
     @Published var printers: [String] = []
-    @Published var printer: String = ""
-    @Published var paper = paperTypes[0]
-    @Published var fit = fitModes[0]
-    @Published var copies = 1
+    @Published var printer: String = "" { didSet { save() } }
+    @Published var paper = paperTypes[0] { didSet { save() } }
+    @Published var fit = fitModes[0] { didSet { save() } }
+    @Published var copies = 1 { didSet { save() } }
     @Published var status = "Fotoğrafları pencereye sürükleyin veya “Fotoğraf Ekle”ye tıklayın."
     @Published var busy = false
+
+    private var abortSend = false
+    private var loaded = false
+    private var lastSaved = Data()
+    private static let sessionURL: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Fotoğraf Çıktı")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("session.json")
+    }()
 
     init() {
         let found = listPrinters()
         printers = found.names
         printer = found.preferred ?? ""
+        restore()
+        loaded = true
+    }
+
+    /// Writes the photo list and every correction to disk, so closing the app loses nothing.
+    private func save() {
+        guard loaded else { return }
+        let session = SavedSession(
+            photos: photos.map { SavedPhoto(path: $0.url.path, turns: $0.turns, fit: $0.fit?.cups, state: $0.state, jobID: $0.jobID) },
+            paper: paper.cups, fit: fit.cups, copies: copies, printer: printer)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(session), data != lastSaved else { return }
+        lastSaved = data
+        try? data.write(to: Self.sessionURL, options: .atomic)
+    }
+
+    private func restore() {
+        guard let data = try? Data(contentsOf: Self.sessionURL),
+              let s = try? JSONDecoder().decode(SavedSession.self, from: data) else { return }
+        paper = paperTypes.first { $0.cups == s.paper } ?? paper
+        fit = fitModes.first { $0.cups == s.fit } ?? fit
+        copies = s.copies
+        if printers.contains(s.printer) { printer = s.printer }
+        photos = s.photos.filter { FileManager.default.fileExists(atPath: $0.path) }.map { sp in
+            var p = Photo(url: URL(fileURLWithPath: sp.path), state: sp.state == .sending ? .ready : sp.state,
+                          jobID: sp.jobID, turns: sp.turns)
+            p.fit = fitModes.first { $0.cups == sp.fit }
+            return p
+        }
+        if !photos.isEmpty { status = "\(photos.count) fotoğraf önceki oturumdan geri yüklendi." }
     }
 
     func add(_ urls: [URL]) {
@@ -116,38 +187,48 @@ final class PrintModel: ObservableObject {
             .map { ($0.id, $0.url, $0.turns, effectiveFit($0).cups == "fill") }
         guard !list.isEmpty else { return }
         busy = true
+        abortSend = false
         let printer = printer, paper = paper.cups, copies = copies
         Task.detached {
             let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("fotograf-cikti")
             try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            // One photo at a time: a printer such as the HP Smart Tank holds a single job and refuses the
+            // next one ("spool-area-full") until it is done, so each job must leave the queue first.
             for (i, (id, url, turns, fill)) in list.enumerated() {
-                await MainActor.run {
-                    self.status = "Gönderiliyor \(i + 1)/\(list.count): \(url.lastPathComponent)"
-                    self.update(id) { $0.state = .sending; $0.message = nil }
-                }
-                guard let file = printableURL(for: url, tempDir: tmp, turns: turns, fill: fill) else {
-                    await MainActor.run { self.update(id) { $0.state = .failed; $0.message = "dosya okunamadı" } }
-                    continue
-                }
-                let r = run("/usr/bin/lp", [
-                    "-d", printer, "-n", String(copies),
-                    "-o", "PageSize=4x6.Fullbleed",       // borderless 4x6
-                    "-o", "MediaType=\(paper)",
-                    "-o", "cupsPrintQuality=High",
-                    "-o", "ColorModel=RGB",
-                    "-o", "print-color-mode=color",       // the sheet is already laid out 2:3, no scaling needed
-                    file.path,
-                ])
-                try? FileManager.default.removeItem(at: file)   // lp has spooled its own copy
-                let job = parseSubmitted(r.out, printer: printer)
-                await MainActor.run {
-                    self.update(id) {
-                        if r.status == 0, let job { $0.state = .queued; $0.jobID = job }
-                        else { $0.state = .failed; $0.message = r.out }
+                if await MainActor.run(body: { self.abortSend }) { break }
+                var outcome: (state: JobState, message: String?) = (.failed, nil)
+                for attempt in 1...3 {
+                    await MainActor.run {
+                        self.status = "Gönderiliyor \(i + 1)/\(list.count): \(url.lastPathComponent)"
+                        self.update(id) { $0.state = .sending; $0.message = attempt > 1 ? "Yeniden deneniyor (\(attempt)/3)" : nil }
                     }
+                    guard let file = printableURL(for: url, tempDir: tmp, turns: turns, fill: fill) else {
+                        outcome = (.failed, "dosya okunamadı"); break
+                    }
+                    let r = run("/usr/bin/lp", [
+                        "-d", printer, "-n", String(copies),
+                        "-o", "PageSize=4x6.Fullbleed",       // borderless 4x6
+                        "-o", "MediaType=\(paper)",
+                        "-o", "cupsPrintQuality=High",
+                        "-o", "ColorModel=RGB",
+                        "-o", "print-color-mode=color",       // the sheet is already laid out 2:3, no scaling needed
+                        file.path,
+                    ])
+                    try? FileManager.default.removeItem(at: file)   // lp has spooled its own copy
+                    guard r.status == 0, let job = parseSubmitted(r.out, printer: printer) else {
+                        outcome = (.failed, r.out); break
+                    }
+                    await MainActor.run { self.update(id) { $0.state = .queued; $0.jobID = job; $0.message = nil } }
+                    outcome = (await waitForJob(job) ?? .failed, nil)
+                    let stopped = await MainActor.run(body: { self.abortSend })
+                    if outcome.state != .failed || stopped || attempt == 3 { break }
+                    try? await Task.sleep(nanoseconds: 15_000_000_000)   // let the printer's own spool drain
                 }
+                let final = outcome
+                await MainActor.run { self.update(id) { $0.state = final.state; $0.message = final.message } }
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
             }
-            await MainActor.run { self.busy = false; self.status = "Gönderim bitti, yazıcı durumu aşağıda izleniyor." }
+            await MainActor.run { self.busy = false; self.status = "Gönderim bitti. Durum fotoğrafların altında." }
         }
     }
 
@@ -172,6 +253,7 @@ final class PrintModel: ObservableObject {
     /// Cancels this app's jobs that are still waiting or on paper.
     func cancelPending() {
         let jobs = photos.filter { $0.state == .queued || $0.state == .printing }.compactMap(\.jobID)
+        abortSend = true   // stop sending the rest of the batch too
         guard !jobs.isEmpty else { return }
         Task.detached {
             _ = run("/usr/bin/cancel", jobs.map(String.init))
