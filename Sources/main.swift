@@ -41,8 +41,6 @@ func run(_ tool: String, _ args: [String]) -> (status: Int32, out: String) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: tool)
     p.arguments = args
-    // CUPS tools localise their output; the status parsers expect the C locale.
-    p.environment = ProcessInfo.processInfo.environment.merging(["LC_ALL": "C"]) { $1 }
     let pipe = Pipe()
     p.standardOutput = pipe
     p.standardError = pipe
@@ -141,7 +139,7 @@ final class PrintModel: ObservableObject {
                     file.path,
                 ])
                 try? FileManager.default.removeItem(at: file)   // lp has spooled its own copy
-                let job = parseSubmitted(r.out)
+                let job = parseSubmitted(r.out, printer: printer)
                 await MainActor.run {
                     self.update(id) {
                         if r.status == 0, let job { $0.state = .queued; $0.jobID = job }
@@ -163,8 +161,7 @@ final class PrintModel: ObservableObject {
         let snap = await Task.detached {
             QueueSnapshot(
                 pending: parseJobList(run("/usr/bin/lpstat", ["-W", "not-completed", "-l", "-o"]).out),
-                history: parseJobList(run("/usr/bin/lpstat", ["-W", "all", "-l", "-o"]).out),
-                printing: parsePrinting(run("/usr/bin/lpstat", ["-p"]).out))
+                history: parseJobList(run("/usr/bin/lpstat", ["-W", "all", "-l", "-o"]).out))
         }.value
         for (id, job) in tracked {
             let (state, message) = snap.state(of: job)

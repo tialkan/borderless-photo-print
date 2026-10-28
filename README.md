@@ -43,10 +43,13 @@ The app talks to CUPS through the standard `lp`, `lpstat` and `cancel` tools. Fo
 renders a finished 2400×3600 px (600 dpi) sheet to a temporary JPEG, sends it with the borderless
 `4x6.Fullbleed` page size, and then polls `lpstat` every two seconds to map each job to a state.
 
-The layout is done in the app rather than through CUPS scaling options on purpose. With the CUPS
-filter used by the HP Smart Tank 580/590 PPD I developed against, running `cupsfilter` on a 3:4 photo
-with `print-scaling=fit` and `print-scaling=fill` produced the same page, so those options could not be
-relied on there. I did not test other printers or filters.
+The layout is done in the app rather than through printer or CUPS scaling options, so the result does
+not depend on how a particular printer scales an image: the finished sheet already has exactly the 2:3
+shape of the page.
+
+The CUPS tools print localised text, so the app does not parse sentences: it takes the job number from
+the printer name in `lp`'s reply and reads job states from the English keywords in `lpstat -l`. I
+verified this on a Turkish-language system.
 
 | File | Role |
 | --- | --- |

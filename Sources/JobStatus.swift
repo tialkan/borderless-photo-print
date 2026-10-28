@@ -25,10 +25,10 @@ func jobID(fromName name: String) -> Int? {
     return Int(name[name.index(after: dash)...])
 }
 
-/// `lp` prints "request id is <printer>-<job> (1 file(s))".
-func parseSubmitted(_ text: String) -> Int? {
-    guard let part = text.components(separatedBy: "request id is ").dropFirst().first else { return nil }
-    return jobID(fromName: String(part.prefix { !$0.isWhitespace }))
+/// `lp` reports the new job as "<printer>-<job>" inside a localised sentence, so match on the printer name.
+func parseSubmitted(_ text: String, printer: String) -> Int? {
+    guard let r = text.range(of: printer + "-") else { return nil }
+    return Int(text[r.upperBound...].prefix { $0.isNumber })
 }
 
 /// `lpstat -o` / `lpstat -l -o` output → lowercased alert and status text per job number.
@@ -48,24 +48,13 @@ func parseJobList(_ text: String) -> [Int: String] {
     return jobs
 }
 
-/// `lpstat -p` prints "printer <name> now printing <name>-<job>." while a job is on paper.
-func parsePrinting(_ text: String) -> Set<Int> {
-    var ids = Set<Int>()
-    for part in text.components(separatedBy: "now printing ").dropFirst() {
-        let token = part.prefix { !$0.isWhitespace }.trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        if let id = jobID(fromName: token) { ids.insert(id) }
-    }
-    return ids
-}
-
 struct QueueSnapshot {
     var pending: [Int: String] = [:]   // not-completed jobs
     var history: [Int: String] = [:]   // all jobs, including completed and canceled
-    var printing = Set<Int>()
 
     func state(of job: Int) -> (JobState, String?) {
         if let text = pending[job] {
-            return (printing.contains(job) || text.contains("job-printing") ? .printing : .queued, nil)
+            return (text.contains("job-printing") ? .printing : .queued, nil)
         }
         let text = history[job] ?? ""
         if text.contains("completed-successfully") { return (.done, nil) }
